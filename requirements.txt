@@ -1,0 +1,23 @@
+# RedditOregon: Reddit Psychedelic Therapy Data Collection
+# Python dependencies
+
+# HTTP and web scraping
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+
+# Database
+psycopg2-binary>=2.9.9
+
+# Environment management
+python-dotenv>=1.0.0
+
+# Dashboard and visualization
+dash>=2.14.0
+plotly>=5.18.0
+pandas>=2.0.0
+
+# Production server
+gunicorn>=21.0.0
+
+# Data export
+openpyxl>=3.1.0
