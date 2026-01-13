@@ -1,18 +1,23 @@
 """
 RedditOregon Dashboard: Interactive visualization for psychedelic therapy data.
-Built with Dash and Plotly.
+Built with Dash and Plotly with full drilldown support.
 """
 
 import os
+import re
 from datetime import datetime
 
 import dash
-from dash import dcc, html, dash_table, callback, Input, Output, State
+from dash import dcc, html, dash_table, callback, Input, Output, State, no_update
 import plotly.express as px
 import plotly.graph_objects as go
 import pandas as pd
 
 from database import get_connection, init_database
+from detector import (
+    RELEVANCE_KEYWORDS, LOCATIONS, SUBSTANCES,
+    TREATMENT_SETTINGS, CLINICAL_INDICATIONS
+)
 
 # Initialize Dash app
 app = dash.Dash(
@@ -36,6 +41,7 @@ COLORS = {
     'card': '#1e293b',         # Slate 800
     'text': '#f8fafc',         # Slate 50
     'muted': '#94a3b8',        # Slate 400
+    'highlight': '#fef08a',    # Yellow highlight
 }
 
 
@@ -64,6 +70,244 @@ def get_dataframe() -> pd.DataFrame:
     except Exception as e:
         print(f"Database error: {e}")
         return pd.DataFrame()
+
+
+def get_highlight_keywords(filter_type: str, filter_value: str) -> list[str]:
+    """Get keywords to highlight based on the filter type and value."""
+    keywords = []
+
+    if filter_type == 'subreddit':
+        # For subreddits, highlight all relevance keywords found
+        for category, data in RELEVANCE_KEYWORDS.items():
+            keywords.extend(data['terms'])
+
+    elif filter_type == 'location':
+        if filter_value in LOCATIONS:
+            keywords.extend(LOCATIONS[filter_value])
+        # Also add general location terms
+        keywords.extend(['oregon', 'colorado', 'portland', 'denver', 'legal', 'licensed'])
+
+    elif filter_type == 'substance':
+        if filter_value in SUBSTANCES:
+            keywords.extend(SUBSTANCES[filter_value])
+
+    elif filter_type == 'treatment_setting':
+        if filter_value in TREATMENT_SETTINGS:
+            keywords.extend(TREATMENT_SETTINGS[filter_value])
+
+    elif filter_type == 'clinical_indication':
+        if filter_value in CLINICAL_INDICATIONS:
+            keywords.extend(CLINICAL_INDICATIONS[filter_value])
+
+    elif filter_type == 'outcome_sentiment':
+        if filter_value == 'positive':
+            keywords.extend(['helped', 'healing', 'healed', 'better', 'improved',
+                           'life-changing', 'transformative', 'breakthrough', 'grateful',
+                           'amazing', 'wonderful', 'incredible', 'recommend', 'worth it'])
+        elif filter_value == 'negative':
+            keywords.extend(['worse', 'bad experience', 'traumatic', 'scary',
+                           'horrible', 'awful', 'regret', 'warning', 'scam'])
+        elif filter_value == 'mixed':
+            keywords.extend(['but', 'however', 'although', 'mixed', 'both'])
+
+    elif filter_type == 'month':
+        # For timeline, highlight therapy-related terms
+        for category, data in RELEVANCE_KEYWORDS.items():
+            keywords.extend(data['terms'][:5])  # Just top 5 from each
+
+    return list(set(keywords))  # Remove duplicates
+
+
+def highlight_text(text: str, keywords: list[str]) -> list:
+    """Highlight keywords in text, returning Dash components."""
+    if not text or not keywords:
+        return [text] if text else []
+
+    # Sort keywords by length (longest first) to avoid partial matches
+    keywords = sorted(set(keywords), key=len, reverse=True)
+
+    # Create pattern for all keywords (case insensitive)
+    pattern = '|'.join(re.escape(kw) for kw in keywords if kw)
+    if not pattern:
+        return [text]
+
+    parts = []
+    last_end = 0
+
+    for match in re.finditer(pattern, text, re.IGNORECASE):
+        # Add text before match
+        if match.start() > last_end:
+            parts.append(text[last_end:match.start()])
+
+        # Add highlighted match
+        parts.append(html.Mark(
+            match.group(),
+            style={
+                'backgroundColor': COLORS['highlight'],
+                'color': '#1e293b',
+                'padding': '2px 4px',
+                'borderRadius': '3px',
+                'fontWeight': 'bold'
+            }
+        ))
+        last_end = match.end()
+
+    # Add remaining text
+    if last_end < len(text):
+        parts.append(text[last_end:])
+
+    return parts if parts else [text]
+
+
+def create_post_card(row: pd.Series, keywords: list[str], index: int = 0) -> html.Div:
+    """Create a card displaying a single post with highlighted keywords and expandable content."""
+    title_parts = highlight_text(row.get('title', 'No title'), keywords)
+    full_content = row.get('content', '') or ''
+
+    # Preview (first 400 chars) and full content
+    preview_length = 400
+    is_long = len(full_content) > preview_length
+    preview_content = full_content[:preview_length] + ('...' if is_long else '')
+
+    preview_parts = highlight_text(preview_content, keywords)
+    full_parts = highlight_text(full_content, keywords) if is_long else preview_parts
+
+    reddit_url = f"https://reddit.com/r/{row.get('subreddit', '')}/comments/{row.get('reddit_id', '')}"
+
+    # Build metadata badges
+    badges = []
+    if row.get('location'):
+        badges.append(html.Span(f"📍 {row['location']}", style={
+            'backgroundColor': COLORS['secondary'],
+            'padding': '4px 8px',
+            'borderRadius': '12px',
+            'marginRight': '8px',
+            'fontSize': '12px'
+        }))
+    if row.get('substance'):
+        badges.append(html.Span(f"💊 {row['substance']}", style={
+            'backgroundColor': COLORS['accent'],
+            'padding': '4px 8px',
+            'borderRadius': '12px',
+            'marginRight': '8px',
+            'fontSize': '12px'
+        }))
+    if row.get('treatment_setting'):
+        badges.append(html.Span(f"🏥 {row['treatment_setting']}", style={
+            'backgroundColor': COLORS['primary'],
+            'padding': '4px 8px',
+            'borderRadius': '12px',
+            'marginRight': '8px',
+            'fontSize': '12px'
+        }))
+    if row.get('outcome_sentiment'):
+        sentiment_colors = {
+            'positive': COLORS['success'],
+            'negative': COLORS['danger'],
+            'mixed': COLORS['warning'],
+            'neutral': COLORS['muted']
+        }
+        badges.append(html.Span(f"💬 {row['outcome_sentiment']}", style={
+            'backgroundColor': sentiment_colors.get(row['outcome_sentiment'], COLORS['muted']),
+            'padding': '4px 8px',
+            'borderRadius': '12px',
+            'marginRight': '8px',
+            'fontSize': '12px'
+        }))
+
+    return html.Div([
+        # Header
+        html.Div([
+            html.Span(f"r/{row.get('subreddit', 'unknown')}", style={
+                'color': COLORS['primary'],
+                'fontWeight': 'bold',
+                'marginRight': '12px'
+            }),
+            html.Span(f"u/{row.get('author', 'unknown')}", style={
+                'color': COLORS['muted'],
+                'marginRight': '12px'
+            }),
+            html.Span(
+                pd.to_datetime(row.get('created_utc')).strftime('%Y-%m-%d') if pd.notna(row.get('created_utc')) else '',
+                style={'color': COLORS['muted']}
+            ),
+            html.A('View on Reddit →', href=reddit_url, target='_blank', style={
+                'color': COLORS['secondary'],
+                'marginLeft': 'auto',
+                'textDecoration': 'none'
+            })
+        ], style={
+            'display': 'flex',
+            'alignItems': 'center',
+            'marginBottom': '8px',
+            'flexWrap': 'wrap',
+            'gap': '8px'
+        }),
+
+        # Title
+        html.H4(title_parts, style={
+            'color': COLORS['text'],
+            'marginBottom': '12px',
+            'fontSize': '16px',
+            'lineHeight': '1.4'
+        }),
+
+        # Badges
+        html.Div(badges, style={'marginBottom': '12px'}) if badges else None,
+
+        # Content - expandable if long
+        html.Details([
+            html.Summary(
+                f"{'📖 Click to expand full post' if is_long else '📄 Full post'}",
+                style={
+                    'color': COLORS['primary'],
+                    'cursor': 'pointer',
+                    'marginBottom': '12px',
+                    'fontSize': '13px',
+                    'fontWeight': 'bold'
+                }
+            ),
+            html.Div(full_parts, style={
+                'color': COLORS['text'],
+                'lineHeight': '1.7',
+                'fontSize': '14px',
+                'whiteSpace': 'pre-wrap',
+                'padding': '12px',
+                'backgroundColor': 'rgba(255,255,255,0.05)',
+                'borderRadius': '8px',
+                'maxHeight': '600px',
+                'overflowY': 'auto'
+            })
+        ], style={'marginBottom': '12px'}) if is_long else html.P(preview_parts, style={
+            'color': COLORS['muted'],
+            'lineHeight': '1.6',
+            'fontSize': '14px',
+            'whiteSpace': 'pre-wrap'
+        }),
+
+        # Preview for long posts (shown when collapsed)
+        html.P(preview_parts, style={
+            'color': COLORS['muted'],
+            'lineHeight': '1.6',
+            'fontSize': '14px',
+            'whiteSpace': 'pre-wrap'
+        }) if is_long else None,
+
+        # Relevance score
+        html.Div([
+            html.Span(f"Relevance: {row.get('relevance_score', 0):.2f}", style={
+                'color': COLORS['primary'],
+                'fontSize': '12px'
+            })
+        ], style={'marginTop': '8px'})
+
+    ], style={
+        'backgroundColor': COLORS['card'],
+        'padding': '20px',
+        'borderRadius': '12px',
+        'marginBottom': '16px',
+        'borderLeft': f"4px solid {COLORS['primary']}"
+    })
 
 
 def create_summary_cards(df: pd.DataFrame) -> html.Div:
@@ -110,11 +354,11 @@ def create_timeline_chart(df: pd.DataFrame) -> go.Figure:
 
     monthly = relevant_df.groupby('month').size().reset_index(name='count')
 
-    fig = px.area(
+    fig = px.bar(
         monthly,
         x='month',
         y='count',
-        title='Relevant Posts Over Time',
+        title='Relevant Posts Over Time (click bar to drill down)',
         color_discrete_sequence=[COLORS['primary']]
     )
 
@@ -126,11 +370,13 @@ def create_timeline_chart(df: pd.DataFrame) -> go.Figure:
         xaxis_title='Month',
         yaxis_title='Posts',
         showlegend=False,
-        margin=dict(l=40, r=40, t=60, b=40)
+        margin=dict(l=40, r=40, t=60, b=40),
+        clickmode='event+select'
     )
 
     fig.update_xaxes(showgrid=True, gridwidth=1, gridcolor=COLORS['card'])
     fig.update_yaxes(showgrid=True, gridwidth=1, gridcolor=COLORS['card'])
+    fig.update_traces(hovertemplate='%{x}<br>Posts: %{y}<extra></extra>')
 
     return fig
 
@@ -165,13 +411,14 @@ def create_subreddit_chart(df: pd.DataFrame) -> go.Figure:
     ))
 
     fig.update_layout(
-        title='Posts by Subreddit',
+        title='Posts by Subreddit (click bar to drill down)',
         barmode='overlay',
         paper_bgcolor='rgba(0,0,0,0)',
         plot_bgcolor='rgba(0,0,0,0)',
         font_color=COLORS['text'],
         legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='right', x=1),
-        margin=dict(l=120, r=40, t=80, b=40)
+        margin=dict(l=120, r=40, t=80, b=40),
+        clickmode='event+select'
     )
 
     return fig
@@ -191,7 +438,7 @@ def create_location_chart(df: pd.DataFrame) -> go.Figure:
     fig = px.pie(
         values=loc_counts.values,
         names=loc_counts.index,
-        title='Geographic Distribution',
+        title='Geographic Distribution (click slice to drill down)',
         color_discrete_sequence=px.colors.sequential.Emrld
     )
 
@@ -219,7 +466,7 @@ def create_substance_chart(df: pd.DataFrame) -> go.Figure:
     fig = px.bar(
         x=sub_counts.index,
         y=sub_counts.values,
-        title='Substances Mentioned',
+        title='Substances Mentioned (click bar to drill down)',
         color=sub_counts.values,
         color_continuous_scale='Emrld'
     )
@@ -232,7 +479,8 @@ def create_substance_chart(df: pd.DataFrame) -> go.Figure:
         coloraxis_showscale=False,
         xaxis_title='Substance',
         yaxis_title='Posts',
-        margin=dict(l=40, r=40, t=60, b=40)
+        margin=dict(l=40, r=40, t=60, b=40),
+        clickmode='event+select'
     )
 
     return fig
@@ -259,7 +507,7 @@ def create_sentiment_chart(df: pd.DataFrame) -> go.Figure:
     fig = px.pie(
         values=sentiment_counts.values,
         names=sentiment_counts.index,
-        title='Outcome Sentiment',
+        title='Outcome Sentiment (click slice to drill down)',
         color=sentiment_counts.index,
         color_discrete_map=colors
     )
@@ -289,7 +537,7 @@ def create_indication_chart(df: pd.DataFrame) -> go.Figure:
         x=ind_counts.values,
         y=ind_counts.index,
         orientation='h',
-        title='Clinical Indications',
+        title='Clinical Indications (click bar to drill down)',
         color=ind_counts.values,
         color_continuous_scale='Purp'
     )
@@ -302,7 +550,8 @@ def create_indication_chart(df: pd.DataFrame) -> go.Figure:
         coloraxis_showscale=False,
         xaxis_title='Posts',
         yaxis_title='',
-        margin=dict(l=100, r=40, t=60, b=40)
+        margin=dict(l=100, r=40, t=60, b=40),
+        clickmode='event+select'
     )
 
     return fig
@@ -322,7 +571,7 @@ def create_treatment_setting_chart(df: pd.DataFrame) -> go.Figure:
     fig = px.pie(
         values=setting_counts.values,
         names=setting_counts.index,
-        title='Treatment Settings',
+        title='Treatment Settings (click slice to drill down)',
         color_discrete_sequence=px.colors.sequential.Purp
     )
 
@@ -336,53 +585,60 @@ def create_treatment_setting_chart(df: pd.DataFrame) -> go.Figure:
     return fig
 
 
-def create_posts_table(df: pd.DataFrame) -> dash_table.DataTable:
-    """Create posts data table."""
-    if df.empty:
-        return dash_table.DataTable()
+def create_drilldown_panel() -> html.Div:
+    """Create the drilldown panel component."""
+    return html.Div([
+        # Header with close button
+        html.Div([
+            html.H3(id='drilldown-title', style={
+                'color': COLORS['text'],
+                'margin': 0
+            }),
+            html.Button('✕ Close', id='close-drilldown', style={
+                'backgroundColor': 'transparent',
+                'border': f'1px solid {COLORS["muted"]}',
+                'color': COLORS['text'],
+                'padding': '8px 16px',
+                'borderRadius': '8px',
+                'cursor': 'pointer'
+            })
+        ], style={
+            'display': 'flex',
+            'justifyContent': 'space-between',
+            'alignItems': 'center',
+            'marginBottom': '20px',
+            'paddingBottom': '16px',
+            'borderBottom': f'1px solid {COLORS["card"]}'
+        }),
 
-    relevant_df = df[df['is_relevant'] == True].head(100)
-
-    display_df = relevant_df[[
-        'subreddit', 'title', 'location', 'substance',
-        'treatment_setting', 'clinical_indication', 'outcome_sentiment',
-        'relevance_score', 'created_utc'
-    ]].copy()
-
-    display_df['created_utc'] = display_df['created_utc'].dt.strftime('%Y-%m-%d')
-    display_df['relevance_score'] = display_df['relevance_score'].round(2)
-
-    return dash_table.DataTable(
-        data=display_df.to_dict('records'),
-        columns=[{'name': col, 'id': col} for col in display_df.columns],
-        style_table={'overflowX': 'auto'},
-        style_cell={
+        # Filter info
+        html.Div(id='drilldown-filter-info', style={
             'backgroundColor': COLORS['card'],
-            'color': COLORS['text'],
-            'textAlign': 'left',
-            'padding': '10px',
-            'whiteSpace': 'normal',
-            'height': 'auto',
-            'maxWidth': '300px',
-            'overflow': 'hidden',
-            'textOverflow': 'ellipsis',
-        },
-        style_header={
-            'backgroundColor': COLORS['background'],
-            'fontWeight': 'bold',
-            'borderBottom': f'2px solid {COLORS["primary"]}'
-        },
-        style_data_conditional=[
-            {
-                'if': {'row_index': 'odd'},
-                'backgroundColor': 'rgba(30, 41, 59, 0.5)'
-            }
-        ],
-        page_size=20,
-        page_action='native',
-        sort_action='native',
-        filter_action='native',
-    )
+            'padding': '12px 16px',
+            'borderRadius': '8px',
+            'marginBottom': '20px',
+            'color': COLORS['muted']
+        }),
+
+        # Posts container
+        html.Div(id='drilldown-posts', style={
+            'maxHeight': '70vh',
+            'overflowY': 'auto'
+        })
+
+    ], id='drilldown-panel', style={
+        'display': 'none',
+        'position': 'fixed',
+        'top': '0',
+        'right': '0',
+        'width': '50%',
+        'height': '100vh',
+        'backgroundColor': COLORS['background'],
+        'padding': '24px',
+        'boxShadow': f'-4px 0 24px rgba(0,0,0,0.5)',
+        'zIndex': '1000',
+        'overflowY': 'auto'
+    })
 
 
 # App layout
@@ -393,7 +649,7 @@ app.layout = html.Div([
             'color': COLORS['primary'],
             'marginBottom': '8px'
         }),
-        html.P('Psychedelic Therapy Experience Data Analysis', style={
+        html.P('Psychedelic Therapy Experience Data Analysis - Click any chart element to drill down', style={
             'color': COLORS['muted'],
             'fontSize': '16px'
         }),
@@ -458,19 +714,6 @@ app.layout = html.Div([
             'flexWrap': 'wrap'
         }),
 
-        # Posts table
-        html.Div([
-            html.H3('Relevant Posts', style={
-                'color': COLORS['text'],
-                'marginBottom': '20px'
-            }),
-            html.Div(id='posts-table')
-        ], style={
-            'backgroundColor': COLORS['card'],
-            'padding': '20px',
-            'borderRadius': '12px'
-        }),
-
         # Footer
         html.Div([
             html.P([
@@ -485,8 +728,14 @@ app.layout = html.Div([
         'padding': '0 20px'
     }),
 
+    # Drilldown panel
+    create_drilldown_panel(),
+
     # Store for data
     dcc.Store(id='data-store'),
+
+    # Store for current drilldown state
+    dcc.Store(id='drilldown-state', data={'visible': False, 'type': None, 'value': None}),
 
     # Interval for refresh
     dcc.Interval(id='refresh-interval', interval=300000, n_intervals=0)  # 5 min
@@ -600,17 +849,157 @@ def update_setting(data):
     return create_treatment_setting_chart(df)
 
 
+# Drilldown callbacks
 @callback(
-    Output('posts-table', 'children'),
-    Input('data-store', 'data')
+    Output('drilldown-state', 'data'),
+    [Input('subreddit-chart', 'clickData'),
+     Input('location-chart', 'clickData'),
+     Input('substance-chart', 'clickData'),
+     Input('sentiment-chart', 'clickData'),
+     Input('indication-chart', 'clickData'),
+     Input('setting-chart', 'clickData'),
+     Input('timeline-chart', 'clickData'),
+     Input('close-drilldown', 'n_clicks')],
+    State('drilldown-state', 'data'),
+    prevent_initial_call=True
 )
-def update_table(data):
+def handle_chart_clicks(sub_click, loc_click, substance_click, sentiment_click,
+                        indication_click, setting_click, timeline_click, close_click,
+                        current_state):
+    """Handle clicks on any chart and update drilldown state."""
+    ctx = dash.callback_context
+
+    if not ctx.triggered:
+        return no_update
+
+    trigger_id = ctx.triggered[0]['prop_id'].split('.')[0]
+
+    # Handle close button
+    if trigger_id == 'close-drilldown':
+        return {'visible': False, 'type': None, 'value': None}
+
+    # Map chart IDs to their filter types and how to extract the value
+    click_data = ctx.triggered[0]['value']
+
+    if not click_data or 'points' not in click_data or not click_data['points']:
+        return no_update
+
+    point = click_data['points'][0]
+
+    if trigger_id == 'subreddit-chart':
+        value = point.get('y', point.get('label'))
+        return {'visible': True, 'type': 'subreddit', 'value': value}
+
+    elif trigger_id == 'location-chart':
+        value = point.get('label', point.get('customdata'))
+        return {'visible': True, 'type': 'location', 'value': value}
+
+    elif trigger_id == 'substance-chart':
+        value = point.get('x', point.get('label'))
+        return {'visible': True, 'type': 'substance', 'value': value}
+
+    elif trigger_id == 'sentiment-chart':
+        value = point.get('label', point.get('customdata'))
+        return {'visible': True, 'type': 'outcome_sentiment', 'value': value}
+
+    elif trigger_id == 'indication-chart':
+        value = point.get('y', point.get('label'))
+        return {'visible': True, 'type': 'clinical_indication', 'value': value}
+
+    elif trigger_id == 'setting-chart':
+        value = point.get('label', point.get('customdata'))
+        return {'visible': True, 'type': 'treatment_setting', 'value': value}
+
+    elif trigger_id == 'timeline-chart':
+        value = point.get('x', point.get('label'))
+        return {'visible': True, 'type': 'month', 'value': value}
+
+    return no_update
+
+
+@callback(
+    [Output('drilldown-panel', 'style'),
+     Output('drilldown-title', 'children'),
+     Output('drilldown-filter-info', 'children'),
+     Output('drilldown-posts', 'children')],
+    [Input('drilldown-state', 'data')],
+    State('data-store', 'data'),
+    prevent_initial_call=True
+)
+def update_drilldown_panel(state, data):
+    """Update the drilldown panel based on state."""
+    base_style = {
+        'position': 'fixed',
+        'top': '0',
+        'right': '0',
+        'width': '50%',
+        'height': '100vh',
+        'backgroundColor': COLORS['background'],
+        'padding': '24px',
+        'boxShadow': f'-4px 0 24px rgba(0,0,0,0.5)',
+        'zIndex': '1000',
+        'overflowY': 'auto'
+    }
+
+    if not state or not state.get('visible'):
+        return {**base_style, 'display': 'none'}, '', '', []
+
     if not data:
-        return html.Div("No data available")
+        return {**base_style, 'display': 'block'}, 'No data', '', []
+
     df = pd.read_json(data, orient='split')
     if 'created_utc' in df.columns:
         df['created_utc'] = pd.to_datetime(df['created_utc'])
-    return create_posts_table(df)
+        df['month'] = df['created_utc'].dt.to_period('M').astype(str)
+
+    filter_type = state.get('type')
+    filter_value = state.get('value')
+
+    # Filter dataframe
+    if filter_type == 'month' and filter_value:
+        # Handle different month formats from chart clicks
+        # Try exact match first, then partial match
+        filtered_df = df[df['month'] == filter_value]
+        if filtered_df.empty:
+            # Try matching just the year-month part
+            filtered_df = df[df['month'].str.contains(str(filter_value)[:7], na=False)]
+    elif filter_type and filter_value:
+        filtered_df = df[df[filter_type] == filter_value]
+    else:
+        filtered_df = df
+
+    # Only show relevant posts
+    filtered_df = filtered_df[filtered_df['is_relevant'] == True]
+
+    # Sort by relevance score
+    filtered_df = filtered_df.sort_values('relevance_score', ascending=False).head(50)
+
+    # Get keywords to highlight
+    keywords = get_highlight_keywords(filter_type, filter_value)
+
+    # Create title
+    fv = filter_value or 'Unknown'
+    title_map = {
+        'subreddit': f'Posts from r/{fv}',
+        'location': f'Posts mentioning {fv}',
+        'substance': f'Posts about {fv}',
+        'outcome_sentiment': f'{fv.title() if fv else "Unknown"} sentiment posts',
+        'clinical_indication': f'Posts about {fv}',
+        'treatment_setting': f'Posts about {fv} settings',
+        'month': f'Posts from {fv}'
+    }
+    title = title_map.get(filter_type, 'Posts')
+
+    # Create filter info
+    filter_info = f"Showing {len(filtered_df)} relevant posts. Highlighted keywords: {', '.join(keywords[:10])}{'...' if len(keywords) > 10 else ''}"
+
+    # Create post cards
+    post_cards = [create_post_card(row, keywords) for _, row in filtered_df.iterrows()]
+
+    if not post_cards:
+        post_cards = [html.Div("No matching posts found", style={'color': COLORS['muted'], 'padding': '20px'})]
+
+    return {**base_style, 'display': 'block'}, title, filter_info, post_cards
 
 
 def init_app():

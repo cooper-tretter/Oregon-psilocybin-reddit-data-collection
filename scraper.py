@@ -35,6 +35,8 @@ TARGET_SUBREDDITS = {
     ],
     # Secondary/regional subreddits
     'secondary': [
+        'askportland',
+        'Portland',
         'AustralianPsychedelics',
         'Drugs',
         'depression',
