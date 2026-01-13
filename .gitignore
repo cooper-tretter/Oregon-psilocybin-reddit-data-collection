@@ -56,3 +56,6 @@ Thumbs.db
 
 # Drafts
 EMAIL_DRAFT_TO_RICK.md
+
+# Data exports
+*.xlsx
