@@ -53,3 +53,6 @@ Thumbs.db
 
 # Claude Code
 .claude/
+
+# Drafts
+EMAIL_DRAFT_TO_RICK.md
